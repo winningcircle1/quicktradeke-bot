@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import React from 'react';
 import { createBrowserRouter, createRoutesFromElements, Route, RouterProvider } from 'react-router-dom';
-import { cleanupUrl, handleOAuthCallback } from '@/external/deriv-core';
+import { cleanupUrl, handleOAuthCallback, storeAuthInfo, storeDerivAccounts, setActiveLoginId, setAccountType } from '@/external/deriv-core';
 import ChunkLoader from '@/components/loader/chunk-loader';
 import LocalStorageSyncWrapper from '@/components/localStorage-sync-wrapper';
 import RoutePromptDialog from '@/components/route-prompt-dialog';
@@ -74,6 +74,48 @@ const router = createBrowserRouter(
 function App() {
     // Handle account switching via URL parameter
     useAccountSwitching();
+
+    // Handle cross-app login bridge: main site passes a live access_token
+    // so this app can authenticate without its own separate OAuth flow.
+    React.useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const bridgeToken = urlParams.get('access_token');
+        if (!bridgeToken) return;
+
+        const handleTokenBridge = async () => {
+            try {
+                const authInfo = {
+                    access_token: bridgeToken,
+                    token_type: 'Bearer',
+                    expires_in: 1800,
+                    expires_at: Math.floor(Date.now() / 1000) + 1800,
+                    scope: 'trade',
+                    refresh_token: '',
+                };
+                storeAuthInfo(authInfo);
+
+                const { DerivWSAccountsService } = await import('@/services/derivws-accounts.service');
+                const accounts = await DerivWSAccountsService.fetchAccountsList(bridgeToken);
+                if (accounts && accounts.length > 0) {
+                    storeDerivAccounts(accounts);
+                    const requestedAccountId = urlParams.get('account_id');
+                    const matchedAccount = accounts.find(a => a.account_id === requestedAccountId) || accounts[0];
+                    setActiveLoginId(matchedAccount.account_id);
+                    setAccountType(matchedAccount.account_type);
+                    const { api_base } = await import('@/external/bot-skeleton');
+                    await api_base.init(true);
+                } else {
+                    console.error('[TokenBridge] No accounts returned for bridged token');
+                }
+            } catch (error) {
+                console.error('[TokenBridge] Error bridging login from main site:', error);
+            } finally {
+                cleanupUrl(window.location.origin);
+            }
+        };
+
+        handleTokenBridge();
+    }, []);
 
     React.useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
